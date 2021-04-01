@@ -1,0 +1,255 @@
+---
+title: "HW3"
+author: "Randall Thompson"
+date: "3/31/2021"
+output: html_document
+---
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(kknn)
+library(palmerpenguins)
+```
+
+## HW3 Question 1
+```{r}
+data <- palmerpenguins::penguins_raw
+
+#Changing from character to factor for easier processing in the next step
+data$`Clutch Completion` <- as.factor(data$`Clutch Completion`)
+data$Sex <- as.factor(data$Sex)
+```
+
+We'll do a .75/.25 training/test split. 
+```{r}
+set.seed(1234)
+pen_split <- initial_split(data)
+
+train <- training(pen_split)
+test <- testing(pen_split)
+
+pen_split
+```
+
+Reviewing the data, sample number is an index column and individualID is a unique id which adds no value to our model. Region and Stage have no variance so those will be excluded. Comments are a free text so we exclude that too. Date sample collected and study name are procedural so we remove those as well. Island is not a great variable to use because two of our three species are only from one island so we will exclude this variable too. 
+
+For our recipe, we'll make Species the dependant variable and use the remaining variables as independant. First we remove the columns we mentioned earlier either through the step_rm function. Variables with zero variance will be removed by the step_zv function. Next we impute the missing data with K-nearest neighbors. Lastly, we center and scale our data with the step_normalize function.
+
+```{r}
+#A recipe is a reusable list of steps to process our data.
+
+pen_rec <- recipe(Species~., data=train) %>% 
+  step_rm("Comments", "Sample Number", "Individual ID", "Date Egg", "studyName", "Island") %>%
+  step_zv(all_predictors()) %>% 
+  #step_naomit(all_predictors(), skip = TRUE) %>% 
+  step_knnimpute(all_predictors()) %>% 
+  step_normalize(all_numeric()) %>% 
+  prep()
+
+pen_rec
+```
+
+
+```{r}
+#Next we create our model. 
+
+knn <- nearest_neighbor() %>% 
+  set_engine("kknn") %>% 
+  set_mode("classification")
+
+knn
+```
+
+
+```{r}
+#Now we combine these objects into a workflow object.
+
+knn_flow <- workflow() %>% 
+  add_recipe(pen_rec) %>% 
+  add_model(knn)
+
+knn_flow
+```
+
+Now that out building blocks are made, let's fit our recipe to our model.
+```{r}
+knn_fit <- knn %>% fit(Species~., data = juice(pen_rec))
+
+knn_fit 
+```
+
+The type of kernel function used to weight distances between samples is "optimal". This kernel found that the best number of k's to use are 5. With these parameters, the misclassification rate was found to be 0.0155%
+
+To validate these results, we will use 10 fold cross validation. 
+
+```{r}
+set.seed(1234)
+validation_splits <- vfold_cv(data = data, strata = Species) 
+```
+
+Now we fit our resamples to our recipe and model.
+```{r}
+knn_res <- fit_resamples(
+  knn,
+  pen_rec,
+  validation_splits, 
+  metrics = metric_set(recall, precision, f_meas, accuracy, kap, roc_auc, sens, spec),
+  control = control_resamples(save_pred = TRUE)
+)
+
+knn_res %>%
+  collect_metrics()
+```
+
+Our accuracy has stayed the same at around 0.0156% misclassification. 
+
+Let's look at these results in a confusion matrix. 
+
+```{r}
+knn_res %>%
+  unnest(.predictions) %>%
+  conf_mat(Species, .pred_class)
+```
+
+Here are the ROC curves for each classification.
+```{r}
+knn_res %>% 
+  unnest(.predictions) %>%
+  roc_curve(Species, ".pred_Adelie Penguin (Pygoscelis adeliae)":".pred_Gentoo penguin (Pygoscelis papua)") %>%
+  autoplot()
+```
+
+Finally we fit our test data and view our results. 
+
+```{r}
+pen <- last_fit(knn_flow, 
+  split = pen_split,
+  metrics = metric_set(recall, precision, f_meas,accuracy, kap,roc_auc, sens, spec))
+
+pen %>% collect_metrics()
+```
+
+```{r}
+pen %>% 
+  collect_predictions() %>%
+  conf_mat(Species, .pred_class)
+```
+
+```{r}
+pen %>% 
+  collect_predictions() %>% 
+  roc_curve(Species, ".pred_Adelie Penguin (Pygoscelis adeliae)":".pred_Gentoo penguin (Pygoscelis papua)") %>% 
+  autoplot()
+```
+
+We conclude that K-Nearest Neighbors is a great classification tool. With such high accuracy, we're skeptical that something is not behaving appropriately but it appears to be working as intended. We proceed with cautious optimism. 
+
+
+## HW3 Question 2
+
+---
+title: "HW3EDA"
+author: "Randall Thompson"
+date: "3/23/2021"
+output: html_document
+---
+```{r}
+library(tidyverse)
+library(tidymodels)
+
+loans <- read_csv("Loan_approval.csv")
+```
+
+```{r}
+loans$Credit_History <- replace_na(loans$Credit_History, 2)
+loans$Credit_History <- as.factor(loans$Credit_History)
+loans[sapply(loans, is.character)] <- lapply(loans[sapply(loans, is.character)], as.factor)
+```
+
+```{r}
+skimr::skim(loans)
+```
+
+
+
+```{r}
+GGally::ggpairs(loans, mapping = "Loan_Status", columns = 2:12) %>% print()
+```
+
+```{r}
+loan_rec1 <- recipe(Loan_Status~., data=loans) %>% 
+  #step_rm(all_nominal(), -Loan_Status) %>%  
+  #step_zv(all_predictors()) %>% 
+  #step_knnimpute(all_predictors()) %>% 
+  prep()
+
+loan_rec
+```
+
+
+```{r}
+features <- loan_rec %>% 
+  juice()
+
+caret::featurePlot(x=features[, 1:4], y=features$Loan_Status, "density", scales = list(x = list(relation="free"), y = list(relation="free")))
+```
+
+
+```{r}
+tree <- decision_tree() %>% 
+  set_engine("rpart") %>% 
+  set_mode("classification")
+
+tree
+```
+
+```{r}
+set.seed(1234)
+loan_split <- initial_split(loans)
+
+loan_train <- training(loan_split)
+loan_test <- testing(loan_split)
+
+loan_split
+```
+
+```{r}
+tree_fit <- tree %>% fit(Loan_Status~., data = juice(loan_rec))
+
+tree_fit 
+```
+
+```{r}
+set.seed(1234)
+loan_xval <- vfold_cv(data = loans, strata = Loan_Status) 
+```
+
+```{r}
+tree_res <- fit_resamples(
+  tree,
+  loan_rec,
+  resamples = loan_xval, 
+  metrics = metric_set(recall, precision, f_meas, accuracy, kap, roc_auc, sens, spec),
+  control = control_resamples(save_pred = TRUE)) 
+
+tree_res %>%  collect_metrics(summarize = TRUE)
+```
+
+```{r}
+tree_res1 <- fit_resamples(
+  tree,
+  loan_rec1,
+  resamples = loan_xval, 
+  metrics = metric_set(recall, precision, f_meas, accuracy, kap, roc_auc, sens, spec),
+  control = control_resamples(save_pred = TRUE)) 
+
+tree_res1 %>%  collect_metrics(summarize = TRUE)
+```
+
+```{r}
+workflow() %>% add_model(tree) %>% add_recipe(loan_rec) %>% fit(data = loans) %>% pull_workflow_fit() %>% vip::vip()
+
+workflow() %>% add_model(tree) %>% add_recipe(loan_rec1) %>% fit(data = loans) %>% pull_workflow_fit() %>% vip::vip(num_features = 10)
+```
+
